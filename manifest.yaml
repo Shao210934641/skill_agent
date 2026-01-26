@@ -1,9 +1,9 @@
 version: 0.0.1
 type: plugin
 author: lfenghx
-name: skill_agent
+name: CP_skill_agent
 label:
-  en_US: Skill_Agent
+  en_US: CP_Skill_Agent
   ja_JP: Skill_Agent
   zh_Hans: Skill_Agent
   pt_BR: Skill_Agent
