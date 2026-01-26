@@ -78,6 +78,25 @@ def _is_within_dir(base: Path, target: Path) -> bool:
         return False
 
 
+# def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
+#     dest_dir.mkdir(parents=True, exist_ok=True)
+#     with ZipFile(zip_path) as zf:
+#         for info in zf.infolist():
+#             name = info.filename
+#             if not name:
+#                 continue
+#             if name.startswith("/") or name.startswith("\\"):
+#                 raise RuntimeError("压缩包包含非法路径")
+#             target_path = (dest_dir / name).resolve()
+#             if not _is_within_dir(dest_dir, target_path):
+#                 raise RuntimeError("压缩包包含越权路径")
+#             if info.is_dir():
+#                 target_path.mkdir(parents=True, exist_ok=True)
+#                 continue
+#             target_path.parent.mkdir(parents=True, exist_ok=True)
+#             with zf.open(info) as src, open(target_path, "wb") as dst:
+#                 shutil.copyfileobj(src, dst)
+
 def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
     with ZipFile(zip_path) as zf:
@@ -85,9 +104,24 @@ def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
             name = info.filename
             if not name:
                 continue
-            if name.startswith("/") or name.startswith("\\"):
+
+            # === 新增：尝试修复中文文件名乱码 ===
+            try:
+                # 先尝试用 UTF-8 解码（标准 ZIP）
+                name.encode('utf-8')
+                decoded_name = name
+            except UnicodeEncodeError:
+                # 如果失败，说明 name 已是乱码字节串（实际是 GBK 编码）
+                # 将其按 Latin-1 编码回字节，再用 GBK 解码
+                try:
+                    decoded_name = name.encode('latin1').decode('gbk')
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    decoded_name = name  # 保底
+            # ==================================
+
+            if decoded_name.startswith("/") or decoded_name.startswith("\\"):
                 raise RuntimeError("压缩包包含非法路径")
-            target_path = (dest_dir / name).resolve()
+            target_path = (dest_dir / decoded_name).resolve()
             if not _is_within_dir(dest_dir, target_path):
                 raise RuntimeError("压缩包包含越权路径")
             if info.is_dir():
@@ -96,7 +130,7 @@ def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info) as src, open(target_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)
-
+                
 
 def _find_skill_folders(extracted_root: Path) -> list[Path]:
     candidates: list[Path] = []
