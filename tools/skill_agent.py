@@ -12,6 +12,27 @@ import importlib.util
 import re
 from typing import Any
 
+from utils.tools import (
+    _build_prompt_message_tools,
+    _download_file_content,
+    _extract_first_json_object,
+    _extract_tool_calls,
+    _extract_url_and_name,
+    _guess_mime_type,
+    _infer_ext_from_url,
+    _is_allow_reply,
+    _is_deny_reply,
+    _list_dir,
+    _parse_frontmatter,
+    _parse_tool_call,
+    _read_text,
+    _safe_filename,
+    _safe_get,
+    _safe_join,
+    _shorten_text,
+    _split_message_content,
+ )
+
 from dify_plugin import Tool
 from dify_plugin.entities.model.message import (
     AssistantPromptMessage,
@@ -22,117 +43,9 @@ from dify_plugin.entities.model.message import (
 )
 from dify_plugin.entities.tool import ToolInvokeMessage
 
-
-def _safe_get(obj: Any, key: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(key)
-    try:
-        return obj[key]  # type: ignore[index]
-    except Exception:
-        pass
-    try:
-        return getattr(obj, key)
-    except Exception:
-        return None
-
-
-def _safe_join(root: str, relative_path: str) -> str:
-    root_abs = os.path.abspath(root)
-    joined = os.path.abspath(os.path.join(root_abs, relative_path))
-    if os.path.commonpath([root_abs, joined]) != root_abs:
-        raise ValueError("path is outside root")
-    return joined
-
-
-def _read_text(path: str, max_chars: int = 12000) -> str:
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read(max_chars)
-
-
-def _list_dir(root: str, max_depth: int = 2) -> list[dict[str, Any]]:
-    root_abs = os.path.abspath(root)
-    entries: list[dict[str, Any]] = []
-    root_depth = root_abs.count(os.sep)
-    for current_root, dirs, files in os.walk(root_abs):
-        depth = current_root.count(os.sep) - root_depth
-        if depth > max_depth:
-            dirs[:] = []
-            continue
-        for name in sorted(dirs):
-            entries.append(
-                {
-                    "type": "dir",
-                    "path": os.path.join(current_root, name),
-                    "relative_path": os.path.relpath(os.path.join(current_root, name), root_abs),
-                }
-            )
-        for name in sorted(files):
-            entries.append(
-                {
-                    "type": "file",
-                    "path": os.path.join(current_root, name),
-                    "relative_path": os.path.relpath(os.path.join(current_root, name), root_abs),
-                }
-            )
-    return entries
-
-
-def _parse_frontmatter(content: str) -> dict[str, str]:
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    data: dict[str, str] = {}
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            data[key] = value
-    return data
-
-
-def _extract_first_json_object(text: str) -> str | None:
-    if not text:
-        return None
-    s = text.strip()
-    if s.startswith("```"):
-        lines = s.splitlines()
-        if len(lines) >= 3 and lines[0].startswith("```"):
-            s = "\n".join(lines[1:-1]).strip()
-    start = s.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if escape:
-                escape = False
-                continue
-            if ch == "\\":
-                escape = True
-                continue
-            if ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-            continue
-        if ch == "{":
-            depth += 1
-            continue
-        if ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start : i + 1]
-    return None
-
+SUMMARY_INPUT_MAX_CHARS = 12000
+SUMMARY_KEY_PREFIX = "skill:summary:"
+RESUME_KEY_PREFIX = "skill:resume:"
 
 def _detect_skills_root(explicit_path: str | None) -> str | None:
     if explicit_path and os.path.isdir(explicit_path):
@@ -152,7 +65,7 @@ def _detect_skills_root(explicit_path: str | None) -> str | None:
     return None
 
 
-ALLOWED_COMMANDS = {"python", "node", "pandoc", "soffice", "pdftoppm"}
+ALLOWED_COMMANDS = {"python", "pip", "node", "pandoc", "soffice", "pdftoppm"}
 TEMP_SESSION_PREFIX = "dify-skill-"
 
 
@@ -221,7 +134,6 @@ def _skill_contains_python_module(skill_path: str, module_name: str) -> bool:
             return True
     return False
 
-
 def _ensure_python_module(module_name: str, *, auto_install: bool, cwd: str) -> dict[str, Any]:
     if not module_name or not _is_safe_module_name(module_name):
         return {"ok": False, "error": "invalid module name", "module": module_name}
@@ -251,11 +163,6 @@ def _ensure_python_module(module_name: str, *, auto_install: bool, cwd: str) -> 
         }
     except Exception as e:
         return {"ok": False, "error": "pip install exception", "module": module_name, "exception": str(e)}
-
-SUMMARY_INPUT_MAX_CHARS = 12000
-SUMMARY_KEY_PREFIX = "skill:summary:"
-RESUME_KEY_PREFIX = "skill:resume:"
-
 
 def _get_resume_storage_key(session: Any) -> str:
     candidates = [
@@ -292,35 +199,6 @@ def _storage_set_json(storage: Any, key: str, value: dict[str, Any] | None) -> N
     except Exception:
         _storage_set_text(storage, key, "")
         return
-
-
-def _normalize_small_reply(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    t = text.strip().lower()
-    t = re.sub(r"\s+", "", t)
-    t = re.sub(r"[。．\.，,！!？\?；;：:\-—_~`'\"]+", "", t)
-    return t
-
-
-def _is_allow_reply(text: str) -> bool:
-    t = _normalize_small_reply(text)
-    if not t:
-        return False
-    if any(x in t for x in ("不允许", "不同意", "不可以", "不要", "拒绝", "取消")):
-        return False
-    if t in {"允许", "同意", "可以", "好的", "好", "ok", "okay", "yes", "y", "sure"}:
-        return True
-    if "允许" in t or "同意" in t:
-        return True
-    return False
-
-
-def _is_deny_reply(text: str) -> bool:
-    t = _normalize_small_reply(text)
-    if not t:
-        return False
-    return any(x in t for x in ("不允许", "不同意", "不可以", "不要", "拒绝", "取消"))
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -465,66 +343,6 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
-
-_PROMPT_MESSAGE_TOOLS: list[PromptMessageTool] | None = None
-
-
-def _build_prompt_message_tools() -> list[PromptMessageTool]:
-    global _PROMPT_MESSAGE_TOOLS
-    if _PROMPT_MESSAGE_TOOLS is not None:
-        return _PROMPT_MESSAGE_TOOLS
-
-    tools: list[PromptMessageTool] = []
-    for schema in TOOL_SCHEMAS:
-        if not isinstance(schema, dict):
-            continue
-        function_info = schema.get("function")
-        if not isinstance(function_info, dict):
-            continue
-        name = function_info.get("name")
-        description = function_info.get("description")
-        parameters = function_info.get("parameters")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        if not isinstance(description, str):
-            description = ""
-        if not isinstance(parameters, dict):
-            parameters = {}
-        if "type" not in parameters:
-            parameters["type"] = "object"
-        if "properties" not in parameters or not isinstance(parameters.get("properties"), dict):
-            parameters["properties"] = {}
-        if "required" not in parameters or not isinstance(parameters.get("required"), list):
-            parameters["required"] = []
-        tools.append(PromptMessageTool(name=name.strip(), description=description, parameters=parameters))
-
-    _PROMPT_MESSAGE_TOOLS = tools
-    return tools
-
-
-def _extract_tool_calls(response: Any) -> list[Any]:
-    message = _safe_get(response, "message") or response
-    tool_calls = _safe_get(message, "tool_calls") or []
-    if isinstance(tool_calls, list):
-        return tool_calls
-    return []
-
-
-def _parse_tool_call(tool_call: Any) -> tuple[str | None, str | None, dict[str, Any]]:
-    call_id = _safe_get(tool_call, "id")
-    function_info = _safe_get(tool_call, "function") or {}
-    name = _safe_get(function_info, "name")
-    raw_args = _safe_get(function_info, "arguments") or "{}"
-    if isinstance(raw_args, dict):
-        return call_id, name, raw_args
-    if not isinstance(raw_args, str):
-        return call_id, name, {}
-    try:
-        parsed = json.loads(raw_args)
-        return call_id, name, parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return call_id, name, {}
-
 
 class _AgentRuntime:
 
@@ -762,43 +580,6 @@ def _storage_set_text(storage: Any, key: str, text: str) -> None:
     except Exception:
         return
 
-
-def _guess_mime_type(filename: str) -> str:
-    name = (filename or "").lower()
-    if name.endswith(".xlsx"):
-        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    if name.endswith(".xls"):
-        return "application/vnd.ms-excel"
-    if name.endswith(".csv"):
-        return "text/csv"
-    if name.endswith(".json"):
-        return "application/json"
-    if name.endswith(".txt"):
-        return "text/plain"
-    if name.endswith(".md"):
-        return "text/markdown"
-    if name.endswith(".png"):
-        return "image/png"
-    if name.endswith(".jpg") or name.endswith(".jpeg"):
-        return "image/jpeg"
-    if name.endswith(".pdf"):
-        return "application/pdf"
-    if name.endswith(".zip"):
-        return "application/zip"
-    return "application/octet-stream"
-
-
-def _shorten_text(value: Any, max_len: int = 500) -> str:
-    try:
-        s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    except Exception:
-        s = str(value)
-    s = s.replace("\r", "\\r").replace("\n", "\\n")
-    if len(s) <= max_len:
-        return s
-    return s[: max_len - 3] + "..."
-
-
 def _model_brief(model_config: Any) -> str:
     if isinstance(model_config, dict):
         provider = model_config.get("provider")
@@ -816,55 +597,6 @@ def _dbg(msg: str) -> None:
         print(f"[skill][debug] {msg}", flush=True)
     except Exception:
         return
-
-
-def _coerce_content_item_to_dict(item: Any) -> dict[str, Any] | None:
-    if item is None:
-        return None
-    if isinstance(item, dict):
-        return item
-    try:
-        dumped = item.model_dump()  # type: ignore[attr-defined]
-        if isinstance(dumped, dict):
-            return dumped
-    except Exception:
-        pass
-    try:
-        item_type = getattr(item, "type", None)
-        if item_type:
-            result: dict[str, Any] = {"type": item_type}
-            for k in ("data", "format", "base64_data", "url", "mime_type", "filename", "detail"):
-                v = getattr(item, k, None)
-                if v not in (None, ""):
-                    result[k] = v
-            return result
-    except Exception:
-        pass
-    return None
-
-
-def _split_message_content(content: Any) -> tuple[str, list[dict[str, Any]]]:
-    if content is None:
-        return "", []
-    if isinstance(content, str):
-        return content, []
-    if isinstance(content, list) or isinstance(content, tuple):
-        text_parts: list[str] = []
-        nontext_parts: list[dict[str, Any]] = []
-        for item in content:
-            item_dict = _coerce_content_item_to_dict(item)
-            if not item_dict:
-                continue
-            item_type = item_dict.get("type")
-            if item_type == "text":
-                data = item_dict.get("data")
-                if isinstance(data, str) and data:
-                    text_parts.append(data)
-            else:
-                nontext_parts.append(item_dict)
-        return "".join(text_parts), nontext_parts
-    return "", [{"type": "unknown", "value": str(content)}]
-
 
 def _invoke_llm(
     llm: Any,
@@ -971,6 +703,66 @@ class SkillAgentTool(Tool):
         if not is_resuming:
             _cleanup_old_temp_sessions(temp_root, keep=4, protect_dirs={session_dir})
 
+        file_items: list[Any] = []
+        files_param = tool_parameters.get("files")
+        if isinstance(files_param, list):
+            file_items = [x for x in files_param if x]
+        elif files_param:
+            file_items = [files_param]
+        elif tool_parameters.get("file"):
+            file_items = [tool_parameters.get("file")]
+
+        uploads_context = ""
+        if file_items:
+            uploads_dir = _safe_join(session_dir, "uploads")
+            os.makedirs(uploads_dir, exist_ok=True)
+            uploaded: list[dict[str, Any]] = []
+            for item in file_items:
+                url, name = _extract_url_and_name(item)
+                if not url:
+                    yield self.create_text_message("❌未能获取上传文件 URL（files[i].url）。\n")
+                    return
+                try:
+                    content = _download_file_content(str(url), timeout=45)
+                except Exception as e:
+                    yield self.create_text_message(f"❌文件下载失败：{str(e)}\n")
+                    return
+                ext = _infer_ext_from_url(str(url))
+                filename = _safe_filename(str(name) if name else None, fallback_ext=ext)
+                abs_path = os.path.join(uploads_dir, filename)
+                try:
+                    with open(abs_path, "wb") as f:
+                        f.write(content)
+                except Exception as e:
+                    yield self.create_text_message(f"❌保存上传文件失败：{str(e)}\n")
+                    return
+
+                rel_path = f"uploads/{filename}"
+                mime = None
+                if isinstance(item, dict) and item.get("mime_type"):
+                    mime = str(item.get("mime_type") or "").strip() or None
+                if not mime:
+                    try:
+                        mime = _guess_mime_type(filename)
+                    except Exception:
+                        mime = None
+                uploaded.append(
+                    {
+                        "relative_path": rel_path,
+                        "bytes": len(content),
+                        "mime_type": mime or "",
+                        "filename": filename,
+                        "source_url": str(url),
+                    }
+                )
+
+            lines = ["\n\n[上传文件清单]", "以下路径均相对于本次会话的 session_dir："]
+            for f in uploaded:
+                lines.append(
+                    f"- {f.get('relative_path')} | mime={f.get('mime_type') or ''} | bytes={f.get('bytes') or 0} | filename={f.get('filename') or ''}"
+                )
+            uploads_context = "\n".join(lines) + "\n"
+
         runtime = _AgentRuntime(
             skills_root=skills_root,
             session_dir=session_dir,
@@ -1003,6 +795,8 @@ class SkillAgentTool(Tool):
             + "5) 执行前必须先确认技能包内确实存在可执行入口（脚本/模块等），不要猜测模块名；如果缺少可执行入口，则先交付当前可交付产物，并询问用户是否允许你在 temp 目录中自行创建脚本后再尝试生成。\n"
             + "补充规则：如果用户请求中已经明确给出具体类型/参数，则视为已确认，不要重复追问，直接进入对应分支执行。\n"
             + "补充规则：同一轮内如已获取过某技能的 skill_md，请勿重复调用 get_skill_metadata；可 read_temp_file(skill_md_path)。\n"
+            + "补充规则：当你准备调用 write_temp_file 时，必须先在自然语言里输出一行“写入意图确认”，包含：relative_path + 内容摘要（前 80 字）+ 大致长度；然后再发起工具调用。严禁发起 arguments 为空或缺少 relative_path/content 的 write_temp_file 调用。\n"
+            + (uploads_context or "")
             + "你必须把实现过程中的中间产物写入 temp 会话目录（脚本、草稿、生成物等）：\n"
             + "- 写文本：write_temp_file\n"
             + "- 运行命令生成文件：run_temp_command\n"
@@ -1220,7 +1014,7 @@ class SkillAgentTool(Tool):
                 try:
                     res_text, tool_calls, nontext, chunks, streamed_any = yield from invoke_llm_live(
                         prompt_messages=messages,
-                        tools=_build_prompt_message_tools(),
+                        tools=_build_prompt_message_tools(TOOL_SCHEMAS, PromptMessageTool),
                     )
                 except Exception as e:
                     msg = str(e)
