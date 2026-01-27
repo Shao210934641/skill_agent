@@ -1,12 +1,12 @@
 version: 0.0.2
 type: plugin
-author: lfenghx
+author: aiot
 name: skill_agent
 label:
-  en_US: Skill_Agent
-  ja_JP: Skill_Agent
-  zh_Hans: Skill_Agent
-  pt_BR: Skill_Agent
+  en_US: CP_Skill_Agent
+  ja_JP: CP_Skill_Agent
+  zh_Hans: CP_Skill_Agent
+  pt_BR: CP_Skill_Agent
 description:
   en_US: Skill_Agent is an Agent plugin that can execute tasks based on the Skill progressive disclosure mode.
   ja_JP: Skill_Agent は、Skill 進化的披露モードに基づいてタスクを実行できる Agent プラグインです。
